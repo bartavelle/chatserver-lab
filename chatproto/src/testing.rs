@@ -376,17 +376,29 @@ async fn message_to_outer_user_delayed<M: MessageServer>() -> anyhow::Result<()>
 }
 
 #[cfg(feature = "federation")]
+async fn test_route<M: MessageServer>(
+  server: &M,
+  dest: ServerId,
+  expected: Vec<ServerId>,
+) -> anyhow::Result<()> {
+  let rt = server.route_to(dest).await;
+  if rt.as_ref() != Some(&expected) {
+    anyhow::bail!("wrong route: expected {:?}, got {:?}", expected, rt)
+  }
+  Ok(())
+}
+
+#[cfg(feature = "federation")]
 async fn routing_test<M: MessageServer>() -> anyhow::Result<()> {
   let sid = ServerId::default();
   let server: M = MessageServer::new(sid);
 
-  let c1 = server.register_local_client("user 1".to_string()).await;
   /* map:
 
-        us - s1 - s2
-         |         |
-        s5 - s4 - s3 
-   */
+       us - s1 - s2
+        |         |
+       s5 - s4 - s3
+  */
   let s1 = ServerId::from(1);
   let s2 = ServerId::from(2);
   let s3 = ServerId::from(3);
@@ -404,7 +416,7 @@ async fn routing_test<M: MessageServer>() -> anyhow::Result<()> {
   if r != expected_empty_out {
     anyhow::bail!("msg1: Expected {:?}\n,    got {:?}", expected_empty_out, r);
   }
-  assert_eq!(server.route_to(s4).await, Some(vec![sid, s1, s2, s3, s4]));
+  test_route(&server, s4, vec![sid, s1, s2, s3, s4]).await?;
   // now advertise another alternative route
   let r = server
     .handle_server_message(ServerMessage::Announce {
@@ -415,7 +427,60 @@ async fn routing_test<M: MessageServer>() -> anyhow::Result<()> {
   if r != expected_empty_out {
     anyhow::bail!("msg3: Expected {:?}\n,    got {:?}", expected_empty_out, r);
   }
-  assert_eq!(server.route_to(s4).await, Some(vec![sid, s5, s4]));
+  test_route(&server, s4, vec![sid, s5, s4]).await?;
+  Ok(())
+}
+
+#[cfg(feature = "federation")]
+async fn routing_test2<M: MessageServer>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(sid);
+
+  /* map:
+
+       us - s1 - s2 - s6
+        |         |    |
+       s5 - s4 - s3    |
+             |         |
+            s7 ---------
+  */
+  let s1 = ServerId::from(1);
+  let s2 = ServerId::from(2);
+  let s3 = ServerId::from(3);
+  let s4 = ServerId::from(4);
+  let s5 = ServerId::from(5);
+  let s6 = ServerId::from(6);
+  let s7 = ServerId::from(7);
+  let s7_user = ClientId::default();
+  let r = server
+    .handle_server_message(ServerMessage::Announce {
+      route: vec![s7, s6, s2, s3, s4, s5],
+      clients: HashMap::from([(s7_user, "user".to_string())]),
+    })
+    .await;
+  let expected_empty_out = ServerReply::Outgoing(Vec::new());
+  if r != expected_empty_out {
+    anyhow::bail!("msg1: Expected {:?}\n,    got {:?}", expected_empty_out, r);
+  }
+  let r = server
+    .handle_server_message(ServerMessage::Announce {
+      route: vec![s5, s4, s7, s6, s2, s1],
+      clients: HashMap::new(),
+    })
+    .await;
+  let expected_empty_out = ServerReply::Outgoing(Vec::new());
+  if r != expected_empty_out {
+    anyhow::bail!("msg1: Expected {:?}\n,    got {:?}", expected_empty_out, r);
+  }
+  test_route(&server, s4, vec![sid, s5, s4])
+    .await
+    .context("r1")?;
+  test_route(&server, s6, vec![sid, s1, s2, s6])
+    .await
+    .context("r2")?;
+  test_route(&server, s7, vec![sid, s5, s4, s7])
+    .await
+    .context("r3")?;
   Ok(())
 }
 
@@ -466,7 +531,11 @@ async fn all_tests<M: MessageServer>(counter: &mut usize) -> anyhow::Result<()> 
       .await
       .with_context(|| "message_to_outer_user_delayed")?;
     *counter += 1;
-    routing_test::<M>().await.with_context(|| "routing")?;
+    routing_test::<M>().await.with_context(|| "real routing")?;
+    *counter += 1;
+    routing_test2::<M>()
+      .await
+      .with_context(|| "real routing 2")?;
     *counter += 1;
   }
   Ok(())
