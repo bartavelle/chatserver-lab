@@ -136,7 +136,6 @@ where
   todo!()
 }
 
-
 // hashmaps are encoded by first writing the size (using u128), then each key and values
 pub fn userlist<W>(w: &mut W, m: &HashMap<ClientId, String>) -> std::io::Result<()>
 where
