@@ -1,8 +1,7 @@
 use async_std::net::UdpSocket;
 use async_std::sync::RwLock;
 use async_std::task;
-use chatproto::core::MessageServer;
-#[cfg(feature = "federation")]
+use chatproto::core::{DefaultChecker, MessageServer, SpamChecker};
 use chatproto::messages::ServerReply;
 use chatproto::messages::{ClientError, ClientQuery, Sequence, ServerId};
 use chatproto::netproto::{decode, encode};
@@ -30,8 +29,7 @@ struct Opt {
   slisten: IpAddr,
 }
 
-#[cfg(feature = "federation")]
-async fn server_thread<S: MessageServer>(
+async fn server_thread<S: MessageServer<DefaultChecker>>(
   listen: IpAddr,
   port: u16,
   srv: &RwLock<S>,
@@ -55,7 +53,8 @@ async fn server_thread<S: MessageServer>(
   }
 }
 
-async fn handle_client_query<S: MessageServer>(
+async fn handle_client_query<S: MessageServer<DefaultChecker>>(
+  src_ip: IpAddr,
   srv: &RwLock<S>,
   m: Sequence<ClientQuery>,
 ) -> anyhow::Result<Vec<u8>> {
@@ -75,7 +74,10 @@ async fn handle_client_query<S: MessageServer>(
         anyhow::bail!("Error when handling register message: {}", rr);
       }
     }
-    let id = lock.register_local_client(name).await;
+    let id = lock
+      .register_local_client(src_ip, name)
+      .await
+      .ok_or_else(|| anyhow::anyhow!("flagged as spammer"))?;
     let mut ocurs = Cursor::new(Vec::new());
     encode::clientid(&mut ocurs, &id)?;
     return Ok(ocurs.into_inner());
@@ -107,7 +109,7 @@ async fn handle_client_query<S: MessageServer>(
   }
 }
 
-async fn client_thread<S: MessageServer>(
+async fn client_thread<S: MessageServer<DefaultChecker>>(
   listen: IpAddr,
   port: u16,
   srv: &RwLock<S>,
@@ -120,7 +122,7 @@ async fn client_thread<S: MessageServer>(
     let mut cursor = Cursor::new(buf[..n].to_vec());
     match decode::sequence(&mut cursor, decode::client_query) {
       Err(rr) => log::error!("Could not decode message from {}: {}", peer, rr),
-      Ok(m) => match handle_client_query(srv, m).await {
+      Ok(m) => match handle_client_query(peer.ip(), srv, m).await {
         Ok(msg) => {
           log::debug!("sending message {:?}", msg);
           match socket.send_to(&msg, peer).await {
@@ -138,9 +140,9 @@ fn main() {
   pretty_env_logger::init();
   let opt = Opt::from_args();
 
-  let server = chatproto::solutions::sample::Server::new(ServerId::default());
+  let server =
+    chatproto::solutions::sample::Server::new(DefaultChecker::default(), ServerId::default());
   let clock = Arc::new(RwLock::new(server));
-  #[cfg(feature = "federation")]
   let slock = clock.clone();
 
   task::block_on(async move {
@@ -149,14 +151,12 @@ fn main() {
         log::error!("{}", rr)
       }
     });
-    #[cfg(feature = "federation")]
     let schild = task::spawn(async move {
       if let Err(rr) = server_thread(opt.slisten, opt.sport, &slock).await {
         log::error!("{}", rr)
       }
     });
     cchild.await;
-    #[cfg(feature = "federation")]
     let _ = schild.cancel().await;
   });
 }

@@ -355,7 +355,6 @@ mod test {
     let src = Sequence {
       seqid: 12,
       src: uuid!["77ff529e-75bd-4832-bf0c-6db339022924"].into(),
-      workproof: 161666813615,
       content: "Hello".to_string(),
     };
     let encoded = &[

@@ -76,7 +76,6 @@ impl std::fmt::Display for ServerId {
 pub struct Sequence<A> {
   pub seqid: u128,
   pub src: ClientId,
-  pub workproof: u128,
   pub content: A,
 }
 
@@ -129,9 +128,7 @@ pub enum ServerMessage {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ClientError {
-  WorkProofError, // workproof failed
   UnknownClient,  // client is unknown
-  SequenceError,  // sequence number not increasing
   BoxFull(ClientId),
   InternalError,
 }
@@ -139,10 +136,8 @@ pub enum ClientError {
 impl std::fmt::Display for ClientError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      ClientError::SequenceError => "SequenceError".fmt(f),
       ClientError::BoxFull(clientid) => write!(f, "BoxFull({})", clientid),
       ClientError::InternalError => "InternalError".fmt(f),
-      ClientError::WorkProofError => "WorkProofError".fmt(f),
       ClientError::UnknownClient => "UnknownClient".fmt(f),
     }
   }

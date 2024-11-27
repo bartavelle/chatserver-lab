@@ -2,12 +2,10 @@ use async_std::channel::{Receiver, Sender};
 use async_std::net::UdpSocket;
 use async_std::sync::RwLock;
 use chatproto::client::Client;
-use chatproto::core::WORKPROOF_STRENGTH;
 use chatproto::messages::{
   ClientId, ClientMessage, ClientPollReply, ClientQuery, ClientReply, Sequence,
 };
 use chatproto::netproto::{decode, encode};
-use chatproto::workproof::gen_workproof;
 use crossterm::event::KeyEventKind;
 use crossterm::{
   event::{DisableMouseCapture, EnableMouseCapture, KeyCode},
@@ -366,7 +364,7 @@ async fn handle_network(
         network.send(&msg).await?;
         let reply = network.get(decode::client_poll_reply).await?;
         let mut lk = USERS.write().await;
-        let selected = lk.selected.clone();
+        let selected = lk.selected;
         match reply {
           ClientPollReply::Nothing => continue,
           ClientPollReply::DelayedError(msg) => ERRORS.write().await.push(format!("{:?}", msg)),
@@ -433,12 +431,10 @@ async fn main_task() -> anyhow::Result<()> {
   let opt = Opt::from_args();
   let network = Network::new((opt.host, opt.port).into()).await?;
   let tempid = ClientId::default();
-  let workproof = gen_workproof((&tempid).into(), WORKPROOF_STRENGTH, u128::MAX).unwrap();
 
   let sq = Sequence {
     seqid: 0,
     src: tempid,
-    workproof,
     content: ClientQuery::Register(opt.name),
   };
 

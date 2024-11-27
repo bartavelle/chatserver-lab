@@ -1,44 +1,49 @@
 use async_std::sync::RwLock;
+use futures::{future, select};
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+  collections::{HashMap, HashSet, VecDeque},
+  net::IpAddr,
+};
 use uuid::Uuid;
 
 use crate::{
-  core::{MessageServer, MAILBOX_SIZE, WORKPROOF_STRENGTH},
+  core::{MessageServer, SpamChecker, MAILBOX_SIZE},
   messages::{
     ClientError, ClientId, ClientMessage, ClientPollReply, ClientReply, FullyQualifiedMessage,
     Sequence, ServerId,
   },
-  workproof::verify_workproof,
 };
 
-#[cfg(feature = "federation")]
 use crate::messages::{Outgoing, ServerMessage, ServerReply};
 
 // this structure will contain the data you need to track in your server
 // this will include things like delivered messages, clients last seen sequence number, etc.
-pub struct Server {}
+pub struct Server<C: SpamChecker> {
+  checker: C,
+  // add things here
+}
 
 #[async_trait]
-impl MessageServer for Server {
+impl<C: SpamChecker + Send + Sync> MessageServer<C> for Server<C> {
   const GROUP_NAME: &'static str = "WRITE YOUR NAMES HERE, NOT YOUR TEAM NAME, YOUR ACTUAL NAMES!";
 
-  fn new(id: ServerId) -> Self {
+  fn new(checker: C, id: ServerId) -> Self {
     todo!()
   }
 
   // note: you need to roll a Uuid, and then convert it into a ClientId
   // Uuid::new_v4() will generate such a value
   // you will most likely have to edit the Server struct as as to store information about the client
-  async fn register_local_client(&self, name: String) -> ClientId {
+  //
+  // for spam checking, you will need to run both checks in parallel, and take a decision as soon as
+  // each checks return
+  async fn register_local_client(&self, src_ip: IpAddr, name: String) -> Option<ClientId> {
     todo!()
   }
 
   /*
-   implementation notes:
-   * the workproof should be checked first
-    * the nonce is in sequence.src and should be converted with (&sequence.src).into()
-   * then, if the client is known, its last seen sequence number must be verified (and updated)
+   if the client is known, its last seen sequence number must be verified (and updated)
   */
   async fn handle_sequenced_message<A: Send>(
     &self,
@@ -76,7 +81,6 @@ impl MessageServer for Server {
      * if local, deliver them
      * if remote, forward them
   */
-  #[cfg(feature = "federation")]
   async fn handle_server_message(&self, msg: ServerMessage) -> ServerReply {
     todo!()
   }
@@ -87,24 +91,23 @@ impl MessageServer for Server {
 
   // return a route to the target server
   // bonus points if it is the shortest route
-  #[cfg(feature = "federation")]
   async fn route_to(&self, destination: ServerId) -> Option<Vec<ServerId>> {
     todo!()
   }
 }
 
-impl Server {
+impl<C: SpamChecker + Sync + Send> Server<C> {
   // write your own methods here
 }
 
 #[cfg(test)]
 mod test {
-  use crate::testing::test_message_server;
+  use crate::testing::{test_message_server, TestChecker};
 
   use super::*;
 
   #[test]
   fn tester() {
-    test_message_server::<Server>();
+    test_message_server::<Server<TestChecker>>();
   }
 }

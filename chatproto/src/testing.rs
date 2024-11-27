@@ -1,14 +1,158 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, net::IpAddr, time::Duration};
 
 use anyhow::Context;
+use async_std::task::sleep;
+use async_trait::async_trait;
 
 use crate::{client::Client, core::*, messages::*};
 
-async fn sequence_correct<M: MessageServer>() -> Result<(), ClientError> {
+fn localhost() -> IpAddr {
+  "127.0.0.1".parse().unwrap()
+}
+
+enum TestCheckerMode {
+  Standard,
+  Set { ip: bool, user: bool },
+  DelayIp,
+  DelayUser,
+}
+
+pub struct TestChecker {
+  mode: TestCheckerMode,
+}
+
+impl TestChecker {
+  fn new(mode: TestCheckerMode) -> Self {
+    Self { mode }
+  }
+}
+
+impl Default for TestChecker {
+  fn default() -> Self {
+    Self::new(TestCheckerMode::Standard)
+  }
+}
+
+#[async_trait]
+impl SpamChecker for TestChecker {
+  async fn is_user_spammer(&self, _name: &str) -> bool {
+    match self.mode {
+      TestCheckerMode::Standard => false,
+      TestCheckerMode::Set { ip: _, user } => user,
+      TestCheckerMode::DelayIp => true,
+      TestCheckerMode::DelayUser => {
+        sleep(Duration::from_secs(10)).await;
+        panic!("should not happen, you did not handle spamming checks in parallel")
+      }
+    }
+  }
+  async fn is_ip_spammer(&self, _name: &IpAddr) -> bool {
+    match self.mode {
+      TestCheckerMode::Standard => false,
+      TestCheckerMode::Set { ip, user: _ } => ip,
+      TestCheckerMode::DelayUser => true,
+      TestCheckerMode::DelayIp => {
+        sleep(Duration::from_secs(10)).await;
+        panic!("should not happen, you did not handle spamming checks in parallel")
+      }
+    }
+  }
+}
+
+async fn spammer_both<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
-  let c1 = server.register_local_client("user1".to_string()).await;
-  let c2 = server.register_local_client("user2".to_string()).await;
+  let server: M = MessageServer::new(
+    TestChecker::new(TestCheckerMode::Set {
+      ip: true,
+      user: true,
+    }),
+    sid,
+  );
+  if server
+    .register_local_client(localhost(), "user1".to_string())
+    .await
+    .is_some()
+  {
+    anyhow::bail!("should have been recognized as spammer")
+  }
+  Ok(())
+}
+
+async fn spammer_ip<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(
+    TestChecker::new(TestCheckerMode::Set {
+      ip: true,
+      user: false,
+    }),
+    sid,
+  );
+  if server
+    .register_local_client(localhost(), "user1".to_string())
+    .await
+    .is_some()
+  {
+    anyhow::bail!("should have been recognized as spammer")
+  }
+  Ok(())
+}
+
+async fn spammer_user<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(
+    TestChecker::new(TestCheckerMode::Set {
+      ip: false,
+      user: true,
+    }),
+    sid,
+  );
+  if server
+    .register_local_client(localhost(), "user1".to_string())
+    .await
+    .is_some()
+  {
+    anyhow::bail!("should have been recognized as spammer")
+  }
+  Ok(())
+}
+
+async fn spammer_delay_ip<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(TestChecker::new(TestCheckerMode::DelayIp), sid);
+  if server
+    .register_local_client(localhost(), "user1".to_string())
+    .await
+    .is_some()
+  {
+    anyhow::bail!("should have been recognized as spammer")
+  }
+  Ok(())
+}
+
+async fn spammer_delay_user<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(TestChecker::new(TestCheckerMode::DelayUser), sid);
+  if server
+    .register_local_client(localhost(), "user1".to_string())
+    .await
+    .is_some()
+  {
+    anyhow::bail!("should have been recognized as spammer")
+  }
+  Ok(())
+}
+
+async fn sequence_correct<M: MessageServer<TestChecker>>() -> Result<(), ClientError> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(TestChecker::default(), sid);
+  let c1 = server
+    .register_local_client(localhost(), "user1".to_string())
+    .await
+    .unwrap();
+  let c2 = server
+    .register_local_client(localhost(), "user2".to_string())
+    .await
+    .unwrap();
   let mut client1 = Client::new(c1);
   let mut client2 = Client::new(c2);
 
@@ -24,9 +168,9 @@ async fn sequence_correct<M: MessageServer>() -> Result<(), ClientError> {
   Ok(())
 }
 
-async fn sequence_unknown_user<M: MessageServer>() -> anyhow::Result<()> {
+async fn sequence_unknown_user<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
   let c1 = ClientId::default();
   let mut client1 = Client::new(c1);
 
@@ -37,63 +181,18 @@ async fn sequence_unknown_user<M: MessageServer>() -> anyhow::Result<()> {
   }
 }
 
-async fn sequence_bad<M: MessageServer>() -> anyhow::Result<()> {
+async fn simple_client_test<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
-  let c1 = server.register_local_client("user 1".to_string()).await;
-  let mut client1 = Client::new(c1);
-  let seq1 = client1.sequence(());
-  let mut seq2 = client1.sequence(());
-  seq2.seqid = seq1.seqid;
-  server.handle_sequenced_message(seq1).await?;
-  match server.handle_sequenced_message(seq2).await {
-    Err(ClientError::SequenceError) => Ok(()),
-    t => anyhow::bail!("expected a sequence error, got {:?}", t),
-  }
-}
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
-async fn workproof_bad<M: MessageServer>() -> anyhow::Result<()> {
-  let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
-  let c1 = server.register_local_client("user 1".to_string()).await;
-  let r = server
-    .handle_sequenced_message(Sequence {
-      seqid: 1,
-      src: c1,
-      workproof: 0,
-      content: (),
-    })
-    .await;
-  match r {
-    Err(ClientError::WorkProofError) => Ok(()),
-    rr => anyhow::bail!("expected a workproof error, got {:?}", rr),
-  }
-}
-
-async fn sequence_multiple_problems<M: MessageServer>() -> anyhow::Result<()> {
-  let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
-  let c1 = ClientId::default();
-  let r = server
-    .handle_sequenced_message(Sequence {
-      seqid: 1,
-      src: c1,
-      workproof: 0,
-      content: (),
-    })
-    .await;
-  match r {
-    Err(ClientError::WorkProofError) => Ok(()),
-    rr => anyhow::bail!("expected a workproof error, got {:?}", rr),
-  }
-}
-
-async fn simple_client_test<M: MessageServer>() -> anyhow::Result<()> {
-  let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
-
-  let c1 = server.register_local_client("user 1".to_string()).await;
-  let c2 = server.register_local_client("user 2".to_string()).await;
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
+  let c2 = server
+    .register_local_client(localhost(), "user 2".to_string())
+    .await
+    .unwrap();
   let r = server
     .handle_client_message(
       c1,
@@ -103,7 +202,7 @@ async fn simple_client_test<M: MessageServer>() -> anyhow::Result<()> {
       },
     )
     .await;
-  if r != &[ClientReply::Delivered] {
+  if r != [ClientReply::Delivered] {
     anyhow::bail!("expected a single delivered message, got {:?}", r)
   }
   let reply = server.client_poll(c2).await;
@@ -121,13 +220,16 @@ async fn simple_client_test<M: MessageServer>() -> anyhow::Result<()> {
   Ok(())
 }
 
-async fn list_users_test<M: MessageServer>() -> anyhow::Result<()> {
+async fn list_users_test<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
   let mut usermap = HashMap::new();
   for n in 0..100_u32 {
     let username = format!("user {n}");
-    let id = server.register_local_client(username.clone()).await;
+    let id = server
+      .register_local_client(localhost(), username.clone())
+      .await
+      .unwrap();
     usermap.insert(id, username);
   }
   let actual = server.list_users().await;
@@ -139,13 +241,22 @@ async fn list_users_test<M: MessageServer>() -> anyhow::Result<()> {
 }
 
 /// sends 100 single messages, and 100 multiple recipients messages
-async fn multiple_client_messages_test<M: MessageServer>() -> anyhow::Result<()> {
+async fn multiple_client_messages_test<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
-  let c1 = server.register_local_client("user 1".to_string()).await;
-  let c2 = server.register_local_client("user 2".to_string()).await;
-  let c3 = server.register_local_client("user 3".to_string()).await;
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
+  let c2 = server
+    .register_local_client(localhost(), "user 2".to_string())
+    .await
+    .unwrap();
+  let c3 = server
+    .register_local_client(localhost(), "user 3".to_string())
+    .await
+    .unwrap();
   for i in 0..100 {
     let r = server
       .handle_client_message(
@@ -220,12 +331,18 @@ async fn multiple_client_messages_test<M: MessageServer>() -> anyhow::Result<()>
   Ok(())
 }
 
-async fn mixed_results_client_message<M: MessageServer>() -> anyhow::Result<()> {
+async fn mixed_results_client_message<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
-  let c1 = server.register_local_client("user 1".to_string()).await;
-  let c2 = server.register_local_client("user 2".to_string()).await;
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
+  let c2 = server
+    .register_local_client(localhost(), "user 2".to_string())
+    .await
+    .unwrap();
   let c3 = ClientId::default();
 
   let m = server
@@ -243,12 +360,18 @@ async fn mixed_results_client_message<M: MessageServer>() -> anyhow::Result<()> 
   Ok(())
 }
 
-async fn mailbox_full<M: MessageServer>() -> anyhow::Result<()> {
+async fn mailbox_full<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
-  let c1 = server.register_local_client("user 1".to_string()).await;
-  let c2 = server.register_local_client("user 2".to_string()).await;
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
+  let c2 = server
+    .register_local_client(localhost(), "user 2".to_string())
+    .await
+    .unwrap();
 
   for n in 0..MAILBOX_SIZE {
     let m = server
@@ -279,12 +402,14 @@ async fn mailbox_full<M: MessageServer>() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[cfg(feature = "federation")]
-async fn message_to_outer_user<M: MessageServer>() -> anyhow::Result<()> {
+async fn message_to_outer_user<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
-  let c1 = server.register_local_client("user 1".to_string()).await;
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
   let s1 = ServerId::default();
   let s2 = ServerId::default();
   let s3 = ServerId::default();
@@ -328,12 +453,14 @@ async fn message_to_outer_user<M: MessageServer>() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[cfg(feature = "federation")]
-async fn message_to_outer_user_delayed<M: MessageServer>() -> anyhow::Result<()> {
+async fn message_to_outer_user_delayed<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
-  let c1 = server.register_local_client("user 1".to_string()).await;
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
   let s1 = ServerId::default();
   let s2 = ServerId::default();
   let s3 = ServerId::default();
@@ -375,8 +502,7 @@ async fn message_to_outer_user_delayed<M: MessageServer>() -> anyhow::Result<()>
   Ok(())
 }
 
-#[cfg(feature = "federation")]
-async fn test_route<M: MessageServer>(
+async fn test_route<M: MessageServer<TestChecker>>(
   server: &M,
   dest: ServerId,
   expected: Vec<ServerId>,
@@ -388,10 +514,9 @@ async fn test_route<M: MessageServer>(
   Ok(())
 }
 
-#[cfg(feature = "federation")]
-async fn routing_test<M: MessageServer>() -> anyhow::Result<()> {
+async fn routing_test<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
   /* map:
 
@@ -431,10 +556,9 @@ async fn routing_test<M: MessageServer>() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[cfg(feature = "federation")]
-async fn routing_test2<M: MessageServer>() -> anyhow::Result<()> {
+async fn routing_test2<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
-  let server: M = MessageServer::new(sid);
+  let server: M = MessageServer::new(TestChecker::default(), sid);
 
   /* map:
 
@@ -484,24 +608,14 @@ async fn routing_test2<M: MessageServer>() -> anyhow::Result<()> {
   Ok(())
 }
 
-async fn all_tests<M: MessageServer>(counter: &mut usize) -> anyhow::Result<()> {
+async fn all_tests<M: MessageServer<TestChecker>>(counter: &mut usize) -> anyhow::Result<()> {
   sequence_correct::<M>()
     .await
     .with_context(|| "sequence_correct")?;
-  *counter = 1;
-  sequence_bad::<M>().await.with_context(|| "sequence_bad")?;
-  *counter += 1;
-  workproof_bad::<M>()
-    .await
-    .with_context(|| "workproof_bad")?;
   *counter += 1;
   sequence_unknown_user::<M>()
     .await
     .with_context(|| "sequence_unknown_user")?;
-  *counter += 1;
-  sequence_multiple_problems::<M>()
-    .await
-    .with_context(|| "sequence_bad")?;
   *counter += 1;
   simple_client_test::<M>()
     .await
@@ -521,27 +635,38 @@ async fn all_tests<M: MessageServer>(counter: &mut usize) -> anyhow::Result<()> 
   *counter += 1;
   mailbox_full::<M>().await.with_context(|| "mailbox_full")?;
   *counter += 1;
-  #[cfg(feature = "federation")]
-  {
-    message_to_outer_user::<M>()
-      .await
-      .with_context(|| "message_to_outer_user")?;
-    *counter += 1;
-    message_to_outer_user_delayed::<M>()
-      .await
-      .with_context(|| "message_to_outer_user_delayed")?;
-    *counter += 1;
-    routing_test::<M>().await.with_context(|| "real routing")?;
-    *counter += 1;
-    routing_test2::<M>()
-      .await
-      .with_context(|| "real routing 2")?;
-    *counter += 1;
-  }
+  spammer_ip::<M>().await.with_context(|| "spammer_ip")?;
+  *counter += 1;
+  spammer_user::<M>().await.with_context(|| "spammer_user")?;
+  *counter += 1;
+  spammer_both::<M>().await.with_context(|| "spammer_both")?;
+  *counter += 1;
+  message_to_outer_user::<M>()
+    .await
+    .with_context(|| "message_to_outer_user")?;
+  *counter += 1;
+  message_to_outer_user_delayed::<M>()
+    .await
+    .with_context(|| "message_to_outer_user_delayed")?;
+  *counter += 1;
+  spammer_delay_ip::<M>()
+    .await
+    .with_context(|| "spammer_delay_ip")?;
+  *counter += 1;
+  spammer_delay_user::<M>()
+    .await
+    .with_context(|| "spammer_delay_user")?;
+  *counter += 1;
+  routing_test::<M>().await.with_context(|| "real routing")?;
+  *counter += 1;
+  routing_test2::<M>()
+    .await
+    .with_context(|| "real routing 2")?;
+  *counter += 1;
   Ok(())
 }
 
-pub(crate) fn test_message_server<M: MessageServer>() {
+pub(crate) fn test_message_server<M: MessageServer<TestChecker>>() {
   pretty_env_logger::init();
   async_std::task::block_on(async {
     let mut counter = 0;
