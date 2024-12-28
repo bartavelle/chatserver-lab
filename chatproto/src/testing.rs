@@ -453,6 +453,110 @@ async fn message_to_outer_user<M: MessageServer<TestChecker>>() -> anyhow::Resul
   Ok(())
 }
 
+async fn message_from_outer_server<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(TestChecker::default(), sid);
+
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
+  let c2 = server
+    .register_local_client(localhost(), "user 2".to_string())
+    .await
+    .unwrap();
+  let s1 = ServerId::default();
+  let s2 = ServerId::default();
+  let euuid = ClientId::default();
+
+  log::debug!("route: {} -> {} -> us", s1, s2);
+
+  let r = server
+    .handle_server_message(ServerMessage::Announce {
+      route: vec![s1, s2],
+      clients: HashMap::from([(euuid, "external user".into())]),
+    })
+    .await;
+  if r != ServerReply::Outgoing(Vec::new()) {
+    anyhow::bail!("Expected empty outgoing answer, got {:?}", r);
+  }
+  assert_eq!(r, ServerReply::Outgoing(Vec::new()));
+
+  let r = server
+    .handle_server_message(ServerMessage::Message(FullyQualifiedMessage {
+      src: euuid,
+      srcsrv: s1,
+      dsts: vec![(c1, sid), (c2, sid)],
+      content: "coucou".to_string(),
+    }))
+    .await;
+
+  assert_eq!(r, ServerReply::Outgoing(Vec::new()));
+
+  let r = server.client_poll(c1).await;
+  let e1 = ClientPollReply::Message {
+    src: euuid,
+    content: "coucou".to_string(),
+  };
+  if r != e1 {
+    anyhow::bail!("outer server A, expected {e1:?}, got {r:?}")
+  }
+  let r = server.client_poll(c2).await;
+  if r != e1 {
+    anyhow::bail!("outer server B, expected {e1:?}, got {r:?}")
+  }
+
+  Ok(())
+}
+
+async fn message_from_outer_server2<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
+  let sid = ServerId::default();
+  let server: M = MessageServer::new(TestChecker::default(), sid);
+
+  let c1 = server
+    .register_local_client(localhost(), "user 1".to_string())
+    .await
+    .unwrap();
+  let s1 = ServerId::default();
+  let s2 = ServerId::default();
+  let euuid = ClientId::default();
+
+  log::debug!("route: {} -> {} -> us", s1, s2);
+
+  let r = server
+    .handle_server_message(ServerMessage::Announce {
+      route: vec![s1, s2],
+      clients: HashMap::from([(euuid, "external user".into())]),
+    })
+    .await;
+  if r != ServerReply::Outgoing(Vec::new()) {
+    anyhow::bail!("Expected empty outgoing answer, got {:?}", r);
+  }
+  assert_eq!(r, ServerReply::Outgoing(Vec::new()));
+
+  let r = server
+    .handle_server_message(ServerMessage::Message(FullyQualifiedMessage {
+      src: euuid,
+      srcsrv: s1,
+      dsts: vec![(c1, sid)],
+      content: "coucou".to_string(),
+    }))
+    .await;
+
+  assert_eq!(r, ServerReply::Outgoing(Vec::new()));
+
+  let r = server.client_poll(c1).await;
+  assert_eq!(
+    r,
+    ClientPollReply::Message {
+      src: euuid,
+      content: "coucou".to_string()
+    }
+  );
+
+  Ok(())
+}
+
 async fn message_to_outer_user_delayed<M: MessageServer<TestChecker>>() -> anyhow::Result<()> {
   let sid = ServerId::default();
   let server: M = MessageServer::new(TestChecker::default(), sid);
@@ -657,6 +761,14 @@ async fn all_tests<M: MessageServer<TestChecker>>(counter: &mut usize) -> anyhow
     .await
     .with_context(|| "spammer_delay_user")?;
   *counter += 1;
+  message_from_outer_server::<M>()
+    .await
+    .with_context(|| "message_from_outer_server")?;
+  *counter += 1;
+  message_from_outer_server2::<M>()
+    .await
+    .with_context(|| "message_from_outer_server2")?;
+  *counter += 1;
   routing_test::<M>().await.with_context(|| "real routing")?;
   *counter += 1;
   routing_test2::<M>()
@@ -667,7 +779,7 @@ async fn all_tests<M: MessageServer<TestChecker>>(counter: &mut usize) -> anyhow
 }
 
 pub(crate) fn test_message_server<M: MessageServer<TestChecker>>() {
-  pretty_env_logger::init();
+  let _ = pretty_env_logger::try_init();
   async_std::task::block_on(async {
     let mut counter = 0;
     match all_tests::<M>(&mut counter).await {
