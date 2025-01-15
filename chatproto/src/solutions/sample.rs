@@ -1,5 +1,5 @@
 use async_std::sync::RwLock;
-use futures::{future, select};
+use futures::{FutureExt, select};
 use async_trait::async_trait;
 use std::{
   collections::{HashMap, HashSet, VecDeque},
